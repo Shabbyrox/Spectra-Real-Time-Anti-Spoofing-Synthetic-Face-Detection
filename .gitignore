@@ -1,0 +1,16 @@
+venv/
+__pycache__/
+*.pyc
+scratch_lcc/
+raw_data/
+data/
+*.zip
+.kaggle/
+kaggle.json
+.DS_Store
+.claude/
+
+# trained model weights (large, regenerate with train.py)
+# NOTE: face_detection_yunet_2023mar.onnx is intentionally NOT ignored —
+# keep it committed so the app runs after a fresh clone.
+*.pth

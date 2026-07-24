@@ -1,0 +1,6 @@
+numpy
+opencv-python<5  # v5 removed cv2.CascadeClassifier + bundled Haar cascades
+torch
+torchvision
+matplotlib
+streamlit
