@@ -37,6 +37,70 @@ Spectra decides whether a face in front of the camera is a **live person** or a 
 
 ---
 
+## Technical details
+
+Spectra is **primarily neural-network based** — two CNNs do the work — combined with one classical detector fallback and one deterministic signal-processing transform.
+
+### Components
+
+| Component | Type | Neural net? | Trained here? | ~Params | Role |
+|---|---|:---:|:---:|---|---|
+| **YuNet** | CNN (ONNX) | ✅ | No — pretrained, frozen | ~85K | Face detection |
+| **Haar cascade** | Viola–Jones (AdaBoost) | ❌ | No | — | Fallback detector |
+| **2D-FFT** | Signal processing (DSP) | ❌ | Not learned | 0 | RGB → frequency spectrum |
+| **SpectraNet** | Deep CNN (two-stream) | ✅ | **Yes** | ~11.4M | Classifier (live vs spoof) |
+
+### SpectraNet architecture
+
+A two-stream network that reads the face two ways and fuses them:
+
+- **Stream A — appearance (`ResNet18`).** An 18-layer residual CNN from torchvision, pretrained on ImageNet with the final classifier removed → a **512-d** feature. Early layers (`conv1`, `bn1`, `layer1`, `layer2`) are **frozen**; deeper layers are fine-tuned (transfer learning), which is what makes high accuracy possible from a small dataset.
+- **Stream B — frequency (`FFT-CNN`).** A small CNN trained from scratch (~70K params) over the 2D-FFT spectrum:
+  `Conv(3→16)+BN+ReLU+Pool → Conv(16→32)+BN+ReLU+Pool → AdaptiveAvgPool(4×4) → Flatten → Linear(512→128)` → a **128-d** feature.
+- **Fusion head.** `concat[512 + 128 = 640] → Linear(640→128) → ReLU → Dropout(0.4) → Linear(128→2)` → 2 logits → softmax → `P(real)`, `P(fake)`.
+
+### The 2D-FFT feature
+
+Per color channel of the face crop:
+
+```
+F      = FFT2(channel)                        # 2D Fast Fourier Transform
+Fshift = fftshift(F)                          # low frequencies to the center
+mag    = 20 · log(|Fshift| + ε)               # log-magnitude spectrum
+spec   = clip((mag − 70) / (215 − 70)) · 255  # fixed-window normalize → 0..255
+```
+
+A face shown on a **screen** produces *moiré* (interference between the display's pixel grid and the camera sensor grid); prints add paper texture; GANs leave periodic artifacts. These are nearly invisible in pixel space but appear as distinct structure in the frequency domain — the signal Stream B learns from. A **fixed** normalization window (not per-image min/max) preserves absolute magnitude, and the ROI is resized to 224×224 **before** the FFT so every sample shares one frequency scale.
+
+### Training configuration
+
+| Setting | Value |
+|---|---|
+| Loss | Cross-entropy, class-weighted |
+| Optimizer | AdamW · lr 1e-4 · weight-decay 1e-4 |
+| LR schedule | StepLR (×0.5 every 8 epochs) |
+| Epochs / batch | 20 / 16 |
+| Augmentation | flip, rotation ±12°, scale 0.9–1.1, brightness/contrast — applied to the crop, then the FFT is **recomputed** so both streams stay consistent |
+| RGB normalization | ImageNet mean/std |
+| Split / selection | Stratified 80/20; best **validation-accuracy** checkpoint saved |
+| Device | Apple MPS / CUDA / CPU (auto) |
+
+### Inference (per frame)
+
+1. Detect the largest face (YuNet → Haar → refuse if none).
+2. Crop & resize to 224×224; build both the RGB and FFT views.
+3. SpectraNet forward pass → softmax probabilities.
+4. **Temporal smoothing** — average probabilities over the last 4 frames.
+5. **Thresholding** — below 60% confidence → `UNCERTAIN`; no face → `NO FACE`; else `AUTHENTIC` / `SPOOF`.
+
+### Design rationale
+
+- **Two streams beat one** — RGB alone plateaued (~72% on the harder task); the FFT stream adds a physical spoof signal that isn't recoverable from pixels. Spatial + frequency = complementary evidence.
+- **Transfer learning does the heavy lifting** — a from-scratch small CNN capped near random on the hard task; a pretrained ResNet18 backbone is what makes small-dataset accuracy possible.
+- **Classical pieces where learning isn't needed** — the FFT is exact math; Haar is a zero-dependency safety net if the DNN detector is unavailable.
+
+---
+
 ## Results
 
 Trained on **LCC-FASD** (real faces vs. replay/print presentation attacks):
